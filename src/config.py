@@ -22,6 +22,14 @@ class Config:
     CHROMA_PERSIST_DIR: str = os.getenv("CHROMA_PERSIST_DIR", "./chroma_db")
     COLLECTION_NAME: str = os.getenv("COLLECTION_NAME", "rag_chatbot_docs")
 
+    
+
+    EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
+    CHUNK_SIZE: int = int(os.getenv("CHUNK_SIZE", "1000"))
+    CHUNK_OVERLAP: int = int(os.getenv("CHUNK_OVERLAP", "200"))
+    COLLECTION_NAME: str = os.getenv("COLLECTION_NAME", "rag_documents")
+    CHROMA_PERSIST_DIR: str = os.getenv("CHROMA_PERSIST_DIR", "./chroma_db")
+
     # Retrieval
     TOP_K_RESULTS: int = int(os.getenv("TOP_K_RESULTS", "5"))
 

@@ -9,6 +9,10 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
+from src.vectorstore_manager import vectorstore_manager
+from src.ingestion_pipeline import ingest_text, ingest_file
+import os, shutil
+from fastapi import UploadFile, File
 
 from src.schemas import (
     ChatRequest, ChatResponse,
@@ -48,6 +52,12 @@ async def lifespan(app: FastAPI):
         persist_directory=config.CHROMA_PERSIST_DIR,
     )
     app.state.embeddings = embeddings
+    # STARTUP
+    print("Starting up RAG Chatbot API...")
+    vectorstore_manager.initialize()   # ← add this line
+    yield
+    # SHUTDOWN
+    print("Shutting down...")
     # TODO Day 13: Initialize retrieval chain here
     # TODO Day 14: Initialize memory here
 
@@ -100,31 +110,32 @@ async def health_check():
     Health check endpoint.
     Load balancers and monitoring tools call this to confirm the service is alive.
     """
-    return HealthResponse(
+    stats = vectorstore_manager.get_stats()
+    return HealthResponse(        
         status="healthy",
         version=config.API_VERSION,
-        vectorstore_ready=False,  # Will be True after Day 12
-        total_documents=0
+        vectorstore_ready=stats["ready"], 
+        document_count=stats["document_count"],
     )
 
 
 @app.post("/ingest", response_model=IngestResponse, tags=["Documents"])
-async def ingest_text(request: IngestRequest):
+async def ingest_text_endpoint(request: IngestRequest):
     """
     Ingest raw text into the vector store.
-    Day 11: Returns a placeholder — real ingestion added Day 12.
     """
-    logger.info(f"Ingest request received: source='{request.source_name}'")
+    logger.info(f"Ingest request received: source='{request.source}'")
 
-    # Placeholder — real pipeline added Day 12
+    result = ingest_text(request.text, source_name=request.source or "direct_input")
     return IngestResponse(
-        message="Ingestion pipeline not yet connected — coming Day 12",
-        chunks_created=0,
-        source_name=request.source_name
+        success=True,
+        message=f"Ingested {result['chunks_stored']} chunks from {result['source']}",
+        chunks_created=result["chunks_created"],
+        source_name=result["source"],
     )
 
 
-@app.post("/ingest/file", tags=["Documents"])
+@app.post("/ingest/file",response_model=IngestResponse, tags=["Documents"])
 async def ingest_file(file: UploadFile = File(...)):
     """
     Upload a PDF or text file for ingestion.
@@ -132,7 +143,7 @@ async def ingest_file(file: UploadFile = File(...)):
     Day 11: Validates file type, returns placeholder.
     """
     logger.info(f"File upload received: {file.filename}, type: {file.content_type}")
-
+    # Save uploaded file temporarily
     allowed_types = ["application/pdf", "text/plain"]
     if file.content_type not in allowed_types:
         raise HTTPException(
@@ -145,13 +156,21 @@ async def ingest_file(file: UploadFile = File(...)):
 
     logger.info(f"File size: {file_size_kb:.1f} KB")
 
-    # Placeholder — real pipeline added Day 12
-    return {
-        "message": "File received. Ingestion pipeline coming Day 12.",
-        "filename": file.filename,
-        "size_kb": round(file_size_kb, 2),
-        "content_type": file.content_type
-    }
+    temp_path = f"./temp_{file.filename}"
+    with open(temp_path, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+
+    try:
+        result = ingest_file(temp_path)
+    finally:
+        os.remove(temp_path)  # always clean up
+
+    return IngestResponse(
+        success=True,
+        message=f"Ingested {result['chunks_stored']} chunks from {file.filename}",
+        chunks_created=result["chunks_created"],
+        source_name=file.filename,
+    )
 
 
 @app.post("/chat", response_model=ChatResponse, tags=["Chat"])
@@ -188,8 +207,8 @@ async def clear_vectorstore():
     Useful during development and testing.
     """
     logger.warning("Vector store clear requested")
-    # Placeholder — real implementation Day 12
-    return {"message": "Vector store clear coming Day 12"}
+    vectorstore_manager.clear()
+    return {"message": "Vectorstore cleared successfully"}
 
 
 @app.get("/stats", tags=["Admin"])
@@ -197,10 +216,4 @@ async def get_stats():
     """
     Return API usage statistics.
     """
-    return {
-        "api_version": config.API_VERSION,
-        "embedding_model": config.EMBEDDING_MODEL,
-        "collection_name": config.COLLECTION_NAME,
-        "vectorstore_ready": False,
-        "note": "Full stats available after Day 12"
-    }
+    return vectorstore_manager.get_stats()
