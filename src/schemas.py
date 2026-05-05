@@ -35,7 +35,7 @@ class SourceDocument(BaseModel):
     content: str = Field(description="The text content of the chunk")
     source: str = Field(description="Where this chunk came from")
     page: Optional[int] = Field(default=None, description="Page number if applicable")
-    score: Optional[float] = Field(default=None, description="Relevance score")
+    chunk_index: Optional[int] = None
 
 
 class ChatResponse(BaseModel):
@@ -60,8 +60,8 @@ class IngestRequest(BaseModel):
         min_length=10,
         description="Raw text to ingest into the vector store"
     )
-    source_name: str = Field(
-        default="manual_input",
+    source: str = Field(
+        default="direct_input",
         description="Name/identifier for this document"
     )
 

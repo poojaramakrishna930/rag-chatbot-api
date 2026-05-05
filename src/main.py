@@ -1,19 +1,19 @@
-"""
-RAG Chatbot API — Main Application
-"""
+# rag-chatbot-api/src/main.py
 
+import os
 import time
+import shutil
+import tempfile
 import logging
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, UploadFile, File, Depends
+
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_chroma import Chroma
+
 from src.vectorstore_manager import vectorstore_manager
 from src.ingestion_pipeline import ingest_text, ingest_file
-import os, shutil
-from fastapi import UploadFile, File
-
+from src.rag_pipeline import rag_pipeline
+from src.pdf_seeder import seed_pdfs_if_empty
 from src.schemas import (
     ChatRequest, ChatResponse,
     IngestRequest, IngestResponse,
@@ -30,40 +30,22 @@ logger = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────
-# Lifespan: startup + shutdown events
+# Lifespan: startup + shutdown
 # ─────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    Code before yield runs on startup.
-    Code after yield runs on shutdown.
-    Use this to initialize expensive resources once.
-    """
     logger.info("🚀 Starting RAG Chatbot API...")
     logger.info(f"   Embedding model : {config.EMBEDDING_MODEL}")
     logger.info(f"   Chroma dir      : {config.CHROMA_PERSIST_DIR}")
     logger.info(f"   Collection      : {config.COLLECTION_NAME}")
 
-    embeddings = HuggingFaceEmbeddings(model_name=config.EMBEDDING_MODEL)
-    app.state.vectorstore = Chroma(
-        collection_name=config.COLLECTION_NAME,
-        embedding_function=embeddings,
-        persist_directory=config.CHROMA_PERSIST_DIR,
-    )
-    app.state.embeddings = embeddings
-    # STARTUP
-    print("Starting up RAG Chatbot API...")
-    vectorstore_manager.initialize()   # ← add this line
-    yield
-    # SHUTDOWN
-    print("Shutting down...")
-    # TODO Day 13: Initialize retrieval chain here
-    # TODO Day 14: Initialize memory here
+    vectorstore_manager.initialize()   # 1. connect ChromaDB
+    seed_pdfs_if_empty()               # 2. ingest 3 PDFs if ChromaDB is empty
+    rag_pipeline.initialize()          # 3. load LLM
 
     logger.info("✅ API ready.")
-    yield  # Server is running here
-
+    yield
     logger.info("🛑 Shutting down RAG Chatbot API...")
 
 
@@ -80,10 +62,9 @@ app = FastAPI(
     redoc_url="/redoc"
 )
 
-# CORS — allows browser frontends to call this API
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],       # Tighten this in real production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -96,7 +77,6 @@ app.add_middleware(
 
 @app.get("/", tags=["Root"])
 async def root():
-    """API root — confirms service is running."""
     return {
         "message": "RAG Chatbot API is running",
         "docs": "/docs",
@@ -106,26 +86,18 @@ async def root():
 
 @app.get("/health", response_model=HealthResponse, tags=["Health"])
 async def health_check():
-    """
-    Health check endpoint.
-    Load balancers and monitoring tools call this to confirm the service is alive.
-    """
     stats = vectorstore_manager.get_stats()
-    return HealthResponse(        
+    return HealthResponse(
         status="healthy",
         version=config.API_VERSION,
-        vectorstore_ready=stats["ready"], 
+        vectorstore_ready=stats["ready"],
         document_count=stats["document_count"],
     )
 
 
 @app.post("/ingest", response_model=IngestResponse, tags=["Documents"])
 async def ingest_text_endpoint(request: IngestRequest):
-    """
-    Ingest raw text into the vector store.
-    """
     logger.info(f"Ingest request received: source='{request.source}'")
-
     result = ingest_text(request.text, source_name=request.source or "direct_input")
     return IngestResponse(
         success=True,
@@ -135,15 +107,10 @@ async def ingest_text_endpoint(request: IngestRequest):
     )
 
 
-@app.post("/ingest/file",response_model=IngestResponse, tags=["Documents"])
-async def ingest_file(file: UploadFile = File(...)):
-    """
-    Upload a PDF or text file for ingestion.
-    Accepts multipart/form-data file uploads.
-    Day 11: Validates file type, returns placeholder.
-    """
+@app.post("/ingest/file", response_model=IngestResponse, tags=["Documents"])
+async def ingest_file_endpoint(file: UploadFile = File(...)):
     logger.info(f"File upload received: {file.filename}, type: {file.content_type}")
-    # Save uploaded file temporarily
+
     allowed_types = ["application/pdf", "text/plain"]
     if file.content_type not in allowed_types:
         raise HTTPException(
@@ -151,19 +118,18 @@ async def ingest_file(file: UploadFile = File(...)):
             detail=f"Unsupported file type: {file.content_type}. Allowed: PDF, TXT"
         )
 
-    contents = await file.read()
-    file_size_kb = len(contents) / 1024
+    # Use system temp directory — safe on Windows
+    suffix = os.path.splitext(file.filename)[-1]
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        shutil.copyfileobj(file.file, tmp)
+        temp_path = tmp.name
 
-    logger.info(f"File size: {file_size_kb:.1f} KB")
-
-    temp_path = f"./temp_{file.filename}"
-    with open(temp_path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
+    logger.info(f"Saved to temp path: {temp_path}")
 
     try:
         result = ingest_file(temp_path)
     finally:
-        os.remove(temp_path)  # always clean up
+        os.remove(temp_path)
 
     return IngestResponse(
         success=True,
@@ -174,38 +140,27 @@ async def ingest_file(file: UploadFile = File(...)):
 
 
 @app.post("/chat", response_model=ChatResponse, tags=["Chat"])
-async def chat(request: ChatRequest):
-    """
-    Main chat endpoint.
-    Accepts a question, retrieves relevant document chunks,
-    generates a grounded answer.
-    Day 11: Returns a placeholder — real RAG chain added Day 13.
-    """
+async def chat_endpoint(request: ChatRequest):
     start_time = time.time()
-    logger.info(f"Chat request: session='{request.session_id}', message='{request.message[:50]}...'")
+    logger.info(f"Chat request: session='{request.session_id}', message='{request.message[:50]}'")
 
-    # Placeholder answer — real RAG logic added Day 13
-    placeholder_answer = (
-        f"RAG pipeline not yet connected. Your question was: '{request.message}'. "
-        f"Full RAG answers coming Day 13."
+    result = rag_pipeline.answer(
+        question=request.message,
+        k=config.TOP_K if hasattr(config, "TOP_K") else 4,
     )
-
+    sources = [SourceDocument(**s) for s in result["sources"]]
     processing_ms = (time.time() - start_time) * 1000
 
     return ChatResponse(
-        answer=placeholder_answer,
-        sources=[],
         session_id=request.session_id,
+        answer=result["answer"],
+        sources=sources,
         processing_time_ms=round(processing_ms, 2)
     )
 
 
 @app.delete("/vectorstore", tags=["Admin"])
 async def clear_vectorstore():
-    """
-    Clear all documents from the vector store.
-    Useful during development and testing.
-    """
     logger.warning("Vector store clear requested")
     vectorstore_manager.clear()
     return {"message": "Vectorstore cleared successfully"}
@@ -213,7 +168,4 @@ async def clear_vectorstore():
 
 @app.get("/stats", tags=["Admin"])
 async def get_stats():
-    """
-    Return API usage statistics.
-    """
     return vectorstore_manager.get_stats()
